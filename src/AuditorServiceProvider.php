@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace DevToolbox\Auditor;
 
 use DevToolbox\Auditor\Commands\AuditorPruneCommand;
+use DevToolbox\Auditor\Listeners\DatabaseQueryListener;
 use DevToolbox\Auditor\Observers\GlobalModelObserver;
+use DevToolbox\Auditor\Resolvers\TableModelResolver;
 use DevToolbox\Auditor\Resolvers\UserResolver;
 use DevToolbox\Auditor\Services\AuditService;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\ServiceProvider;
 
 /**
@@ -16,17 +19,15 @@ use Illuminate\Support\ServiceProvider;
  *
  * Responsible for:
  *  - Publishing config and migration files
- *  - Binding the AuditService and UserResolver in the container
- *  - Registering the GlobalModelObserver on the base Eloquent Model
+ *  - Binding the AuditService, UserResolver, and TableModelResolver
+ *  - Registering the GlobalModelObserver for Eloquent events
+ *  - Registering the DatabaseQueryListener for raw DB::table() queries
  *  - Registering the `auditor:prune` Artisan command
  */
 class AuditorServiceProvider extends ServiceProvider
 {
     /**
      * Registers package bindings into the service container.
-     *
-     * Binds UserResolver as a singleton so the same resolver instance
-     * is reused across all audit events in a single request lifecycle.
      *
      * @return void
      */
@@ -40,6 +41,9 @@ class AuditorServiceProvider extends ServiceProvider
         // Bind UserResolver as singleton — allow overriding in app service providers
         $this->app->singleton(UserResolver::class, UserResolver::class);
 
+        // Bind TableModelResolver as singleton — builds the table->class map once per request
+        $this->app->singleton(TableModelResolver::class, TableModelResolver::class);
+
         // Bind AuditService as singleton for the full request lifecycle
         $this->app->singleton(AuditService::class, function ($app) {
             return new AuditService($app->make(UserResolver::class));
@@ -49,8 +53,6 @@ class AuditorServiceProvider extends ServiceProvider
     /**
      * Bootstraps package services after all providers have registered.
      *
-     * Registers the global model observer and publishes package assets.
-     *
      * @return void
      */
     public function boot(): void
@@ -59,12 +61,11 @@ class AuditorServiceProvider extends ServiceProvider
         $this->loadMigrations();
         $this->registerCommands();
         $this->registerGlobalObserver();
+        $this->registerDatabaseQueryListener();
     }
 
     /**
      * Publishes config and migration files for the host application.
-     *
-     * Run: php artisan vendor:publish --provider="DevToolbox\Auditor\AuditorServiceProvider"
      *
      * @return void
      */
@@ -85,8 +86,6 @@ class AuditorServiceProvider extends ServiceProvider
 
     /**
      * Loads migrations directly from the package directory.
-     *
-     * Allows migration to run without publishing, for simpler setups.
      *
      * @return void
      */
@@ -110,13 +109,13 @@ class AuditorServiceProvider extends ServiceProvider
     }
 
     /**
-     * Registers the GlobalModelObserver on the base Eloquent Model class.
+     * Registers the GlobalModelObserver by listening to Eloquent's fired events
+     * via the application event dispatcher.
      *
-     * This is what makes the package "zero-touch" — by observing the base
-     * Model class, every Eloquent model in the application is automatically
-     * covered without any trait or interface required.
-     *
-     * The observer is only registered if auditing is enabled in config.
+     * We cannot call Model::observe() on the abstract base class directly —
+     * Laravel tries to instantiate it internally which throws an error.
+     * Instead, we listen to the wildcard eloquent.* events on the dispatcher,
+     * which fires for every model in the application automatically.
      *
      * @return void
      */
@@ -140,5 +139,35 @@ class AuditorServiceProvider extends ServiceProvider
                 $observer->{$event}($model);
             });
         }
+    }
+
+    /**
+     * Registers the DatabaseQueryListener on Laravel's QueryExecuted event.
+     *
+     * This captures all raw DB::table() queries that bypass Eloquent.
+     * Only registered when `auditor.db_listener.enabled` is true.
+     *
+     * Note: The listener internally guards against auditing its own
+     * SELECT queries (used to capture old values) via a flag, preventing
+     * infinite recursion.
+     *
+     * @return void
+     */
+    protected function registerDatabaseQueryListener(): void
+    {
+        if (! config('auditor.enabled', true)) {
+            return;
+        }
+
+        if (! config('auditor.db_listener.enabled', true)) {
+            return;
+        }
+
+        $listener = $this->app->make(DatabaseQueryListener::class);
+
+        $this->app->make('events')->listen(
+            QueryExecuted::class,
+            fn(QueryExecuted $event) => $listener->handle($event),
+        );
     }
 }
