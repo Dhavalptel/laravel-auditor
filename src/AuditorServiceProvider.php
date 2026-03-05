@@ -126,6 +126,19 @@ class AuditorServiceProvider extends ServiceProvider
             return;
         }
 
-        Model::observe($this->app->make(GlobalModelObserver::class));
+        $observer = $this->app->make(GlobalModelObserver::class);
+        $events   = $this->app->make('events');
+
+        foreach (['created', 'retrieved', 'updated', 'deleted', 'restored', 'forceDeleted'] as $event) {
+            $events->listen("eloquent.{$event}: *", function (string $eventName, array $payload) use ($observer, $event): void {
+                $model = $payload[0] ?? null;
+
+                if (! $model instanceof Model) {
+                    return;
+                }
+
+                $observer->{$event}($model);
+            });
+        }
     }
 }
