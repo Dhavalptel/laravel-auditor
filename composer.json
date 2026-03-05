@@ -1,0 +1,57 @@
+{
+    "name": "devtoolbox/laravel-auditor",
+    "description": "A zero-touch Laravel auditing package that tracks model lifecycle events without modifying your models.",
+    "type": "library",
+    "keywords": ["laravel", "audit", "auditing", "model-observer", "tracking", "history"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "DevToolbox",
+            "email": "hello@devtoolbox.dev"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/database": "^11.0|^12.0",
+        "illuminate/events": "^11.0|^12.0",
+        "illuminate/queue": "^11.0|^12.0",
+        "illuminate/support": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0",
+        "pestphp/pest": "^2.0",
+        "pestphp/pest-plugin-laravel": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "DevToolbox\\Auditor\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "DevToolbox\\Auditor\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "DevToolbox\\Auditor\\AuditorServiceProvider"
+            ],
+            "aliases": {
+                "Auditor": "DevToolbox\\Auditor\\Facades\\Auditor"
+            }
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
