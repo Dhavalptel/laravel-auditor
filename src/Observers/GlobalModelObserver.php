@@ -66,30 +66,45 @@ class GlobalModelObserver
      * Fires after an existing model has been updated in the database.
      *
      * Only fires when at least one attribute is dirty (changed).
+     * Skips updates that are internal to a restore operation — the
+     * restored() hook captures those instead, preventing duplicate records.
      *
      * @param  Model  $model
      * @return void
      */
     public function updated(Model $model): void
     {
+        // restore() calls save() internally, which fires `updated` before `restored`.
+        // Detect this by checking if deleted_at changed to null and skip here;
+        // restored() will create the authoritative audit record.
+        if (array_key_exists('deleted_at', $model->getChanges()) && $model->deleted_at === null) {
+            return;
+        }
+
         $this->auditService->record($model, AuditEvent::Updated);
     }
 
     /**
      * Fires after a model has been deleted.
      *
-     * Handles both soft deletes and hard deletes:
-     * - Soft delete: model uses SoftDeletes trait and `deleted_at` is set.
-     * - Hard delete: any other deletion.
-     *
-     * Both map to AuditEvent::Deleted, but the distinction is visible
-     * in the `old_values` captured (soft-deleted record retains attributes).
+     * Handles soft deletes only. Hard (force) deletes are handled by
+     * forceDeleted() to avoid duplicate records — when forceDelete() is
+     * called on a SoftDeletes model, Laravel fires both `deleted` and
+     * `forceDeleted`, so we skip `deleted` for force-delete operations.
      *
      * @param  Model  $model
      * @return void
      */
     public function deleted(Model $model): void
     {
+        // forceDelete() fires both `deleted` and `forceDeleted` on SoftDeletes models.
+        // Skip `deleted` here so forceDeleted() creates the single audit record.
+        // Use isForceDeleting() to avoid Eloquent's __get resolving the static
+        // SoftDeletes::forceDeleting($callback) method incorrectly.
+        if (method_exists($model, 'isForceDeleting') && $model->isForceDeleting()) {
+            return;
+        }
+
         $this->auditService->record($model, AuditEvent::Deleted);
     }
 

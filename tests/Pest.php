@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 use DevToolbox\Auditor\Tests\TestCase;
 
+// Load test model definitions (PSR-4 can't autoload multiple classes from one file)
+require_once __DIR__ . '/Models.php';
+
 uses(TestCase::class)->in('Feature', 'Unit');
 
 /**

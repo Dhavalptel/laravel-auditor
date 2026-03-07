@@ -53,6 +53,11 @@ abstract class TestCase extends OrchestraTestCase
 
         // Disable read tracking by default in tests (override per test if needed)
         $app['config']->set('auditor.events.read', false);
+
+        // Disable the DB query listener in tests — it audits framework internal tables
+        // (e.g. migrations) during setUp, polluting the audit table before tests run.
+        // Eloquent-level auditing via GlobalModelObserver remains fully active.
+        $app['config']->set('auditor.db_listener.enabled', false);
     }
 
     /**
