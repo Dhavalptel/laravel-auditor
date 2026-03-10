@@ -28,6 +28,12 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class GlobalModelObserver
 {
     /**
+     * Flag to indicate an Eloquent event is currently being processed.
+     * Used by the DatabaseQueryListener to skip duplicate auditing.
+     */
+    public static bool $processing = false;
+    
+    /**
      * @param  AuditService  $auditService  The core audit service.
      */
     public function __construct(

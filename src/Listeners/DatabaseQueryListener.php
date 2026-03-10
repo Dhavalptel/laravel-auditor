@@ -7,6 +7,7 @@ namespace DevToolbox\Auditor\Listeners;
 use DevToolbox\Auditor\DTOs\AuditEventDTO;
 use DevToolbox\Auditor\Enums\AuditEvent;
 use DevToolbox\Auditor\Jobs\WriteAuditJob;
+use DevToolbox\Auditor\Observers\GlobalModelObserver;
 use DevToolbox\Auditor\Resolvers\TableModelResolver;
 use DevToolbox\Auditor\Resolvers\UserResolver;
 use DevToolbox\Auditor\Services\AuditService;
@@ -129,6 +130,9 @@ class DatabaseQueryListener
             Log::warning('[Auditor] Failed to audit DB query.', [
                 'sql'   => $event->sql ?? null,
                 'error' => $e->getMessage(),
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
             ]);
         }
     }
@@ -147,29 +151,57 @@ class DatabaseQueryListener
      */
     protected function resolveAuditEvent(string $verb): ?AuditEvent
     {
-        $map = [
+        // Map SQL verbs to AuditEvent enum cases
+        $verbMap = [
             'SELECT' => AuditEvent::Read,
             'INSERT' => AuditEvent::Created,
             'UPDATE' => AuditEvent::Updated,
             'DELETE' => AuditEvent::Deleted,
         ];
 
-        $event = $map[$verb] ?? null;
+        $event = $verbMap[$verb] ?? null;
 
         if ($event === null) {
             return null;
         }
 
-        // Check against the db_listener enabled events config
-        $configKey = match ($event) {
-            AuditEvent::Read    => 'read',
-            AuditEvent::Created => 'created',
-            AuditEvent::Updated => 'updated',
-            AuditEvent::Deleted => 'deleted',
-            default             => null,
-        };
+        // Use string value as key — enum cases cannot be used as array keys
+        $eloquentConfigMap = [
+            'read'    => 'auditor.events.read',
+            'created' => 'auditor.events.created',
+            'updated' => 'auditor.events.updated',
+            'deleted' => 'auditor.events.deleted',
+        ];
 
-        if ($configKey && ! config("auditor.db_listener.events.{$configKey}", true)) {
+        $dbConfigMap = [
+            'read'    => 'auditor.db_listener.events.read',
+            'created' => 'auditor.db_listener.events.created',
+            'updated' => 'auditor.db_listener.events.updated',
+            'deleted' => 'auditor.db_listener.events.deleted',
+        ];
+
+        $eventValue        = $event->value; // e.g. 'updated'
+        $eloquentConfigKey = $eloquentConfigMap[$eventValue] ?? null;
+        $dbConfigKey       = $dbConfigMap[$eventValue] ?? null;
+
+        $eloquentTrackingOn = $eloquentConfigKey && config($eloquentConfigKey, true);
+
+        if ($eloquentTrackingOn) {
+            // Eloquent is tracking this event — only allow if NOT fired by Eloquent
+            if (GlobalModelObserver::$processing) {
+                return null; // Eloquent observer will handle it
+            }
+
+            // Raw DB::table() query — check db_listener config
+            if ($dbConfigKey && ! config($dbConfigKey, true)) {
+                return null;
+            }
+
+            return $event;
+        }
+
+        // Eloquent tracking is OFF — fall back to db_listener config only
+        if ($dbConfigKey && ! config($dbConfigKey, true)) {
             return null;
         }
 
