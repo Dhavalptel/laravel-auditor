@@ -9,16 +9,17 @@
 1. [Installation](#1-installation)
 2. [Configuration](#2-configuration)
 3. [How It Works](#3-how-it-works)
-4. [Optional: Per-Model Configuration](#4-optional-per-model-configuration)
-5. [Querying Audit Records](#5-querying-audit-records)
-6. [Working with Millions of Records](#6-working-with-millions-of-records)
-7. [Queue Setup](#7-queue-setup)
-8. [Pruning Old Records](#8-pruning-old-records)
-9. [Custom User Resolver](#9-custom-user-resolver)
-10. [Disabling Auditing](#10-disabling-auditing)
-11. [Facade Reference](#11-facade-reference)
-12. [Database Schema Reference](#12-database-schema-reference)
-13. [Troubleshooting](#13-troubleshooting)
+4. [Raw DB Query Auditing](#4-raw-db-query-auditing)
+5. [Optional: Per-Model Configuration](#5-optional-per-model-configuration)
+6. [Querying Audit Records](#6-querying-audit-records)
+7. [Working with Millions of Records](#7-working-with-millions-of-records)
+8. [Queue Setup](#8-queue-setup)
+9. [Pruning Old Records](#9-pruning-old-records)
+10. [Custom User Resolver](#10-custom-user-resolver)
+11. [Disabling Auditing](#11-disabling-auditing)
+12. [Facade Reference](#12-facade-reference)
+13. [Database Schema Reference](#13-database-schema-reference)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -105,6 +106,24 @@ return [
 
     // Custom user resolver class
     'user_resolver' => \DevToolbox\Auditor\Resolvers\UserResolver::class,
+
+    // Raw DB::table() query auditing
+    'db_listener' => [
+        'enabled'        => env('AUDITOR_DB_LISTENER_ENABLED', true),
+        'exclude_tables' => [
+            'jobs', 'failed_jobs', 'cache', 'sessions',
+            'telescope_entries', 'telescope_entries_tags', 'telescope_monitoring',
+            'pulse_entries', 'pulse_aggregates', 'pulse_values',
+            'horizon_jobs',
+        ],
+        'model_paths'    => [],  // Extra directories to scan for model resolution
+        'events'         => [
+            'created' => true,
+            'read'    => env('AUDITOR_DB_TRACK_READS', false),  // high volume — off by default
+            'updated' => true,
+            'deleted' => true,
+        ],
+    ],
 ];
 ```
 
@@ -141,7 +160,143 @@ The package registers a **global observer** on Laravel's base `Illuminate\Databa
 
 ---
 
-## 4. Optional: Per-Model Configuration
+## 4. Raw DB Query Auditing
+
+In addition to Eloquent model events, the package also audits raw `DB::table()` queries that bypass Eloquent entirely. This covers bulk operations, third-party package writes, and any SQL that never fires a model event.
+
+### How It Works
+
+The `DatabaseQueryListener` hooks into Laravel's `QueryExecuted` event and intercepts INSERT, UPDATE, DELETE, and SELECT statements. Eloquent-originated queries are automatically skipped (they are already handled by the `GlobalModelObserver`).
+
+For UPDATE queries, the listener runs an additional `SELECT` on the same `WHERE` clause **before** returning to capture `old_values`. This means one extra query per audited UPDATE.
+
+For DELETE queries, `old_values` capture is attempted but may return empty if the row is already gone by the time the `QueryExecuted` event fires — this is a known limitation of post-query hooks.
+
+All DB-listener audit records are tagged with `['db-query']` so they can be distinguished from Eloquent-sourced records.
+
+### Configuration
+
+```php
+// config/auditor.php
+'db_listener' => [
+
+    // Master switch — disable without affecting Eloquent auditing
+    'enabled' => env('AUDITOR_DB_LISTENER_ENABLED', true),
+
+    // Tables never audited via DB listener (audits table excluded automatically)
+    'exclude_tables' => [
+        'jobs', 'failed_jobs', 'cache', 'sessions',
+        // add your own high-frequency tables here
+    ],
+
+    // Extra model directories to scan when resolving table → model class
+    // app/Models is always scanned automatically
+    'model_paths' => [
+        // app_path('Domain/Billing/Models'),
+    ],
+
+    // Which SQL verbs to intercept (independent of top-level Eloquent events)
+    'events' => [
+        'created' => true,   // INSERT → new_values = inserted columns
+        'read'    => env('AUDITOR_DB_TRACK_READS', false),  // SELECT — high volume, off by default
+        'updated' => true,   // UPDATE → old_values + new_values
+        'deleted' => true,   // DELETE → old_values (best-effort)
+    ],
+],
+```
+
+### Examples
+
+```php
+// INSERT — captured as AuditEvent::Created
+// new_values = ['name' => 'Alice', 'email' => 'alice@example.com']
+DB::table('users')->insert([
+    'name'  => 'Alice',
+    'email' => 'alice@example.com',
+]);
+
+// UPDATE — captured as AuditEvent::Updated
+// old_values = ['status' => 'pending'] (fetched via pre-UPDATE SELECT)
+// new_values = ['status' => 'active']
+DB::table('orders')
+    ->where('id', 42)
+    ->update(['status' => 'active']);
+
+// DELETE — captured as AuditEvent::Deleted
+// old_values attempted (may be empty for hard deletes — row already gone)
+DB::table('sessions')
+    ->where('user_id', 7)
+    ->delete();
+
+// Bulk UPDATE affecting multiple rows
+// old_values = ['_affected_rows' => 150] when > 1 row matched
+DB::table('subscriptions')
+    ->where('expires_at', '<', now())
+    ->update(['status' => 'expired']);
+```
+
+### Table → Model Resolution
+
+When auditing a raw query, the listener tries to resolve the table name to its Eloquent model class so `auditable_type` is meaningful. It scans `app/Models` by default, plus any directories listed under `model_paths`. If no model is found, the raw table name is stored instead.
+
+```php
+// Table 'orders' → resolves to App\Models\Order::class
+// auditable_type = "App\Models\Order"
+
+// Table 'legacy_data' (no model found)
+// auditable_type = "legacy_data"
+```
+
+### Querying DB-Listener Audits
+
+Because DB-listener records are tagged `'db-query'`, you can filter them specifically:
+
+```php
+use DevToolbox\Auditor\Models\Audit;
+
+// All raw-query audits
+Audit::withTag('db-query')->latest()->paginate(50);
+
+// Raw-query updates on the orders table
+Audit::withTag('db-query')
+    ->forType('orders')
+    ->event(\DevToolbox\Auditor\Enums\AuditEvent::Updated)
+    ->latest()
+    ->get();
+```
+
+### Known Limitations
+
+| Scenario | Behaviour |
+|---|---|
+| `DELETE` on hard-delete tables | `old_values` will be empty — row is already gone when the event fires |
+| Bulk `UPDATE` (multiple rows matched) | `old_values` stored as `['_affected_rows' => N]` instead of per-row diffs |
+| INSERT with mismatched column/binding count | Falls back to `['_bindings' => [...]]` |
+| Raw `DB::statement()` calls | Not intercepted — `QueryExecuted` only fires for PDO-bound queries |
+
+### Disabling the DB Listener
+
+```env
+# .env
+AUDITOR_DB_LISTENER_ENABLED=false
+```
+
+Or, to keep the listener active but exclude specific high-frequency tables:
+
+```php
+// config/auditor.php
+'db_listener' => [
+    'exclude_tables' => [
+        'activity_logs',
+        'api_request_logs',
+    ],
+],
+```
+
+---
+
+## 5. Optional: Per-Model Configuration
+
 
 While auditing requires no changes to your models, you can optionally implement the `Auditable` interface and `HasAuditOptions` trait for fine-grained control.
 
@@ -190,7 +345,7 @@ $user->recordAuditEvent(AuditEvent::Updated, tags: ['manual', 'admin']);
 
 ---
 
-## 5. Querying Audit Records
+## 6. Querying Audit Records
 
 ### Basic Queries
 
@@ -270,7 +425,7 @@ foreach ($audits as $audit) {
 
 ---
 
-## 6. Working with Millions of Records
+## 7. Working with Millions of Records
 
 This section is critical for production systems. Follow these patterns to keep queries fast.
 
@@ -377,7 +532,7 @@ DB::table('audits')->where('created_at', '<', now()->subYears(2))->delete();
 
 ---
 
-## 7. Queue Setup
+## 8. Queue Setup
 
 Audit writes are dispatched asynchronously by default. This keeps your HTTP response times fast.
 
@@ -421,7 +576,7 @@ AUDITOR_QUEUE_ENABLED=false
 
 ---
 
-## 8. Pruning Old Records
+## 9. Pruning Old Records
 
 Use the built-in `auditor:prune` command to keep your table size manageable.
 
@@ -458,7 +613,7 @@ Schedule::command('auditor:prune --days=7 --event=read')->daily()->at('02:30');
 
 ---
 
-## 9. Custom User Resolver
+## 10. Custom User Resolver
 
 If your application uses a non-standard authentication system, you can provide a custom user resolver.
 
@@ -510,7 +665,7 @@ Then update `config/auditor.php`:
 
 ---
 
-## 10. Disabling Auditing
+## 11. Disabling Auditing
 
 ### Globally (via .env)
 
@@ -554,7 +709,7 @@ AUDITOR_ENABLED=false
 
 ---
 
-## 11. Facade Reference
+## 12. Facade Reference
 
 ```php
 use DevToolbox\Auditor\Facades\Auditor;
@@ -572,7 +727,7 @@ Auditor::writeSync($dto);
 
 ---
 
-## 12. Database Schema Reference
+## 13. Database Schema Reference
 
 ```sql
 CREATE TABLE `audits` (
@@ -608,7 +763,7 @@ CREATE TABLE `audits` (
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### Audits Not Being Written
 
@@ -646,6 +801,18 @@ Or exclude specific models:
 4. Select only needed columns: `->select(['id', 'event', 'created_at'])`
 5. Use `EXPLAIN` on your query to confirm index usage
 
+### DB Listener — Audits Not Recording for Raw Queries
+
+1. Verify `AUDITOR_DB_LISTENER_ENABLED=true` in your `.env`
+2. Check that the table is not listed in `auditor.db_listener.exclude_tables`
+3. Confirm the SQL verb is enabled under `auditor.db_listener.events` (e.g. `read` is off by default)
+4. Eloquent queries are intentionally skipped — the listener only covers `DB::table()` calls
+5. Check Laravel logs for `[Auditor] Failed to audit DB query` warnings
+
+### DB Listener — `old_values` Empty on DELETE
+
+This is expected behaviour. The `QueryExecuted` event fires **after** the query completes, so the row is already gone. To capture before-state on hard deletes, use an Eloquent model with a `deleting` observer instead.
+
 ### Testing — Audits Not Recording in Tests
 
 Ensure your test case disables the queue and enables auditing:
@@ -656,5 +823,6 @@ protected function defineEnvironment($app): void
     $app['config']->set('auditor.queue.enabled', false);
     $app['config']->set('auditor.enabled', true);
     $app['config']->set('auditor.events.read', false); // optional
+    $app['config']->set('auditor.db_listener.enabled', false); // disable DB listener in tests
 }
 ```
