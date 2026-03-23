@@ -7,7 +7,6 @@ namespace DevToolbox\Auditor\Listeners;
 use DevToolbox\Auditor\DTOs\AuditEventDTO;
 use DevToolbox\Auditor\Enums\AuditEvent;
 use DevToolbox\Auditor\Jobs\WriteAuditJob;
-use DevToolbox\Auditor\Observers\GlobalModelObserver;
 use DevToolbox\Auditor\Resolvers\TableModelResolver;
 use DevToolbox\Auditor\Resolvers\UserResolver;
 use DevToolbox\Auditor\Services\AuditService;
@@ -67,6 +66,13 @@ class DatabaseQueryListener
      */
     public function handle(QueryExecuted $event): void
     {
+        // Skip if this query was fired by Eloquent internals.
+        // Eloquent queries go through Model::save(), Model::delete() etc.
+        // which are captured by the GlobalModelObserver already.
+        if ($this->isEloquentQuery()) {
+            return;
+        }
+
         // Prevent recursive auditing when we SELECT for old_values
         if ($this->isCapturingOldValues) {
             return;
@@ -137,6 +143,29 @@ class DatabaseQueryListener
         }
     }
 
+    /**
+     * Detects whether the current query was fired by Eloquent
+     * by inspecting the call stack for Eloquent Builder/Model classes.
+     */
+    protected function isEloquentQuery(): bool
+    {
+        $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 20);
+
+        foreach ($trace as $frame) {
+            $class = $frame['class'] ?? '';
+
+            if (
+                str_starts_with($class, 'Illuminate\\Database\\Eloquent\\Model') ||
+                str_starts_with($class, 'Illuminate\\Database\\Eloquent\\Builder') ||
+                str_starts_with($class, 'Illuminate\\Database\\Eloquent\\Relations')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // -------------------------------------------------------------------------
     // Event Resolution
     // -------------------------------------------------------------------------
@@ -150,64 +179,37 @@ class DatabaseQueryListener
      * @return AuditEvent|null
      */
     protected function resolveAuditEvent(string $verb): ?AuditEvent
-    {
-        // Map SQL verbs to AuditEvent enum cases
-        $verbMap = [
-            'SELECT' => AuditEvent::Read,
-            'INSERT' => AuditEvent::Created,
-            'UPDATE' => AuditEvent::Updated,
-            'DELETE' => AuditEvent::Deleted,
-        ];
+{
+    $verbMap = [
+        'SELECT' => AuditEvent::Read,
+        'INSERT' => AuditEvent::Created,
+        'UPDATE' => AuditEvent::Updated,
+        'DELETE' => AuditEvent::Deleted,
+    ];
 
-        $event = $verbMap[$verb] ?? null;
+    $event = $verbMap[$verb] ?? null;
 
-        if ($event === null) {
-            return null;
-        }
-
-        // Use string value as key — enum cases cannot be used as array keys
-        $eloquentConfigMap = [
-            'read'    => 'auditor.events.read',
-            'created' => 'auditor.events.created',
-            'updated' => 'auditor.events.updated',
-            'deleted' => 'auditor.events.deleted',
-        ];
-
-        $dbConfigMap = [
-            'read'    => 'auditor.db_listener.events.read',
-            'created' => 'auditor.db_listener.events.created',
-            'updated' => 'auditor.db_listener.events.updated',
-            'deleted' => 'auditor.db_listener.events.deleted',
-        ];
-
-        $eventValue        = $event->value; // e.g. 'updated'
-        $eloquentConfigKey = $eloquentConfigMap[$eventValue] ?? null;
-        $dbConfigKey       = $dbConfigMap[$eventValue] ?? null;
-
-        $eloquentTrackingOn = $eloquentConfigKey && config($eloquentConfigKey, true);
-
-        if ($eloquentTrackingOn) {
-            // Eloquent is tracking this event — only allow if NOT fired by Eloquent
-            if (GlobalModelObserver::$processing) {
-                return null; // Eloquent observer will handle it
-            }
-
-            // Raw DB::table() query — check db_listener config
-            if ($dbConfigKey && ! config($dbConfigKey, true)) {
-                return null;
-            }
-
-            return $event;
-        }
-
-        // Eloquent tracking is OFF — fall back to db_listener config only
-        if ($dbConfigKey && ! config($dbConfigKey, true)) {
-            return null;
-        }
-
-        return $event;
+    if ($event === null) {
+        return null;
     }
 
+    $eventValue = $event->value;
+
+    $dbConfigMap = [
+        'read'    => 'auditor.db_listener.events.read',
+        'created' => 'auditor.db_listener.events.created',
+        'updated' => 'auditor.db_listener.events.updated',
+        'deleted' => 'auditor.db_listener.events.deleted',
+    ];
+
+    $dbConfigKey = $dbConfigMap[$eventValue] ?? null;
+
+    if ($dbConfigKey && ! config($dbConfigKey, true)) {
+        return null;
+    }
+
+    return $event;
+}
     // -------------------------------------------------------------------------
     // Table Extraction
     // -------------------------------------------------------------------------
@@ -316,7 +318,7 @@ class DatabaseQueryListener
 
         // --- Parse SET clause for new values ---
         if (preg_match('/SET\s+(.+?)\s+WHERE/is', $sql, $setMatch)) {
-            $setPairs = explode(',', $setMatch[1]);
+            $setPairs    = explode(',', $setMatch[1]);
             $setBindings = array_slice($bindings, 0, count($setPairs));
 
             foreach ($setPairs as $i => $pair) {
@@ -326,11 +328,12 @@ class DatabaseQueryListener
             }
         }
 
-        // --- Capture old values via SELECT ---
-        if (preg_match('/WHERE\s+(.+)$/is', $sql, $whereMatch)) {
-            $whereClause  = $whereMatch[1];
-            $table        = $this->extractTableName($sql, 'UPDATE');
+        // --- Capture ONLY the affected columns' old values via SELECT ---
+        if (! empty($newValues) && preg_match('/WHERE\s+(.+)$/is', $sql, $whereMatch)) {
+            $whereClause   = $whereMatch[1];
+            $table         = $this->extractTableName($sql, 'UPDATE');
             $whereBindings = array_slice($bindings, count($newValues));
+            $columns       = array_keys($newValues); // Only select the columns being updated
 
             if ($table) {
                 try {
@@ -338,6 +341,7 @@ class DatabaseQueryListener
 
                     $rows = DB::connection($connectionName)
                         ->table($table)
+                        ->selectRaw(implode(', ', array_map(fn($col) => "`{$col}`", $columns)))
                         ->whereRaw($whereClause, $whereBindings)
                         ->get()
                         ->toArray();
@@ -345,7 +349,6 @@ class DatabaseQueryListener
                     if (count($rows) === 1) {
                         $oldValues = (array) $rows[0];
                     } elseif (count($rows) > 1) {
-                        // Multiple rows updated — store count instead of full data
                         $oldValues = ['_affected_rows' => count($rows)];
                     }
                 } catch (\Throwable) {

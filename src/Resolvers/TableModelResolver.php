@@ -79,7 +79,7 @@ class TableModelResolver
                     $model = new $class();
 
                     if ($model instanceof Model) {
-                        $this->cache[$model->getTable()] = $model->getMorphClass();
+                        $this->cache[$model->getTable()] = strtolower(class_basename($model->getMorphClass()));
                     }
                 } catch (\Throwable) {
                     // Skip models that can't be instantiated without context

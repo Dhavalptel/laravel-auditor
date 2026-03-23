@@ -67,7 +67,7 @@ final class AuditEventDTO
 
         return new self(
             event: $event,
-            auditableType: $model->getMorphClass(),
+            auditableType: strtolower(class_basename($model->getMorphClass())),
             auditableId: (string) $model->getKey(),
             userType: $user?->getMorphClass(),
             userId: $user?->getKey(),
