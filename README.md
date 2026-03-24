@@ -15,10 +15,12 @@
 7. [Queue Setup](#7-queue-setup)
 8. [Pruning Old Records](#8-pruning-old-records)
 9. [Custom User Resolver](#9-custom-user-resolver)
-10. [Disabling Auditing](#10-disabling-auditing)
-11. [Facade Reference](#11-facade-reference)
-12. [Database Schema Reference](#12-database-schema-reference)
-13. [Troubleshooting](#13-troubleshooting)
+10. [Manual Activity Logging](#10-manual-activity-logging)
+11. [Custom Audit Model](#11-custom-audit-model)
+12. [Disabling Auditing](#12-disabling-auditing)
+13. [Facade Reference](#13-facade-reference)
+14. [Database Schema Reference](#14-database-schema-reference)
+15. [Troubleshooting](#15-troubleshooting)
 
 ---
 
@@ -510,7 +512,168 @@ Then update `config/auditor.php`:
 
 ---
 
-## 10. Disabling Auditing
+## 10. Manual Activity Logging
+
+In addition to automatic Eloquent auditing, you can manually log activities using a fluent builder API — similar to Spatie Activity Log.
+
+### Basic Usage
+
+```php
+use DevToolbox\Auditor\Facades\Auditor;
+
+Auditor::inLog('auth')->log('User logged in');
+```
+
+### Log Names — Grouping Activities into Channels
+
+Organise activities into named channels:
+
+```php
+Auditor::inLog('auth')->log('User logged in');
+Auditor::inLog('billing')->log('Invoice created');
+Auditor::inLog('admin')->log('Settings updated');
+```
+
+Activities without a log name default to the `'default'` channel:
+
+```php
+Auditor::newActivity()->log('Something happened'); // log_name = 'default'
+```
+
+### causedBy() — Set Who Caused the Activity
+
+```php
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->log('Invoice voided');
+
+// Stored in causer_type / causer_id columns
+$audit->causer; // returns the $admin model
+```
+
+> **Note:** `causedBy()` populates `causer_type`/`causer_id`. These are distinct from `user_type`/`user_id`, which are auto-populated from the auth context by the global Eloquent observer. The two sets of columns coexist without conflict.
+
+### performedOn() — Set the Subject Model
+
+```php
+Auditor::inLog('billing')
+    ->performedOn($invoice)
+    ->log('Invoice sent to customer');
+
+// Stored in auditable_type / auditable_id columns
+$audit->auditable; // returns the $invoice model
+```
+
+### withProperties() — Attach Custom Data
+
+```php
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->performedOn($invoice)
+    ->withProperties([
+        'amount'   => 1500.00,
+        'currency' => 'USD',
+        'reason'   => 'Annual subscription',
+    ])
+    ->log('Invoice created');
+
+// Retrieve properties
+$audit->properties['amount']; // 1500.00
+```
+
+Add a single property without overwriting the rest:
+
+```php
+Auditor::withProperties(['amount' => 500])
+    ->withProperty('currency', 'USD')
+    ->log('Partial refund');
+```
+
+### Full Fluent Chain
+
+```php
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->performedOn($invoice)
+    ->withProperties(['amount' => 1500, 'plan' => 'pro'])
+    ->log('Invoice created');
+```
+
+### Facade Shortcuts
+
+Any builder method can be called directly on the facade — a new builder is created automatically:
+
+```php
+Auditor::causedBy($user)->log('Profile updated');
+Auditor::performedOn($post)->log('Post viewed by admin');
+Auditor::withProperties(['ip' => $request->ip()])->log('Suspicious login');
+```
+
+### Querying Manual Activity Logs
+
+```php
+use DevToolbox\Auditor\Models\Audit;
+use DevToolbox\Auditor\Enums\AuditEvent;
+
+// All activities in the 'billing' channel
+Audit::inLog('billing')->latest()->paginate(50);
+
+// Multiple channels at once
+Audit::inLog('billing', 'invoices')->latest()->get();
+
+// By specific description
+Audit::withDescription('Invoice created')->latest()->get();
+
+// Filter by event type (all manual activities use AuditEvent::Activity)
+Audit::event(AuditEvent::Activity)->latest()->paginate(50);
+
+// Combine with other scopes
+Audit::inLog('auth')
+    ->event(AuditEvent::Activity)
+    ->withinDays(7)
+    ->latest()
+    ->paginate(25);
+```
+
+---
+
+## 11. Custom Audit Model
+
+Swap the default `Audit` model for your own implementation to add custom methods, relationships, or table logic.
+
+### Step 1 — Create Your Custom Model
+
+```php
+namespace App\Models;
+
+use DevToolbox\Auditor\Models\Audit as BaseAudit;
+
+class CustomAudit extends BaseAudit
+{
+    /**
+     * Example: a custom scope for your application.
+     */
+    public function scopeForTenant($query, int $tenantId)
+    {
+        return $query->where('properties->tenant_id', $tenantId);
+    }
+}
+```
+
+> Your model **must extend** `DevToolbox\Auditor\Models\Audit` to preserve all built-in behaviour (ULID keys, query scopes, relationships, casts).
+
+### Step 2 — Register the Model in Config
+
+```php
+// config/auditor.php
+'audit_model' => \App\Models\CustomAudit::class,
+```
+
+That's it. All audit writes — automatic Eloquent events and manual `->log()` calls — will now create `CustomAudit` records. The `audits()` and `auditTrail()` helpers on models using `HasAuditOptions` will also resolve to your custom model automatically.
+
+---
+
+## 12. Disabling Auditing
 
 ### Globally (via .env)
 
@@ -554,11 +717,13 @@ AUDITOR_ENABLED=false
 
 ---
 
-## 11. Facade Reference
+## 13. Facade Reference
 
 ```php
 use DevToolbox\Auditor\Facades\Auditor;
 use DevToolbox\Auditor\Enums\AuditEvent;
+
+// --- Automatic auditing ---
 
 // Manually record an event
 Auditor::record($model, AuditEvent::Updated);
@@ -568,22 +733,46 @@ Auditor::shouldAudit($model, AuditEvent::Created); // bool
 
 // Write directly to DB (bypasses queue)
 Auditor::writeSync($dto);
+
+// --- Manual activity logging (fluent builder) ---
+
+// Create a fresh builder
+Auditor::newActivity();                                     // ActivityBuilder
+
+// Start the chain from any method
+Auditor::inLog('auth');                                     // ActivityBuilder
+Auditor::causedBy($user);                                   // ActivityBuilder
+Auditor::performedOn($model);                               // ActivityBuilder
+Auditor::withProperties(['key' => 'value']);                // ActivityBuilder
+
+// Full chain — all methods return the same builder for chaining
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->performedOn($invoice)
+    ->withProperties(['amount' => 500])
+    ->withProperty('currency', 'USD')
+    ->log('Invoice created');                               // ?Audit
 ```
 
 ---
 
-## 12. Database Schema Reference
+## 14. Database Schema Reference
 
 ```sql
 CREATE TABLE `audits` (
   `id`             CHAR(26)     NOT NULL,          -- ULID primary key
-  `event`          ENUM(...)    NOT NULL,          -- created|read|updated|deleted|restored
+  `event`          ENUM(...)    NOT NULL,          -- created|read|updated|deleted|restored|activity
+  `log_name`       VARCHAR(255) DEFAULT NULL,      -- Named channel (e.g. 'auth', 'billing')
+  `description`    TEXT         DEFAULT NULL,      -- Human-readable activity description
   `auditable_type` VARCHAR(255) NOT NULL,          -- Morph class name
   `auditable_id`   VARCHAR(36)  NOT NULL,          -- Morph ID (int or UUID)
-  `user_type`      VARCHAR(255) DEFAULT NULL,      -- Actor morph class (nullable)
-  `user_id`        VARCHAR(36)  DEFAULT NULL,      -- Actor ID (nullable)
+  `user_type`      VARCHAR(255) DEFAULT NULL,      -- Auto-resolved actor morph class (nullable)
+  `user_id`        VARCHAR(36)  DEFAULT NULL,      -- Auto-resolved actor ID (nullable)
+  `causer_type`    VARCHAR(255) DEFAULT NULL,      -- Explicit causer morph class (from ->causedBy())
+  `causer_id`      VARCHAR(36)  DEFAULT NULL,      -- Explicit causer ID (from ->causedBy())
   `old_values`     JSON         DEFAULT NULL,      -- State before event
   `new_values`     JSON         DEFAULT NULL,      -- State after event
+  `properties`     JSON         DEFAULT NULL,      -- Custom payload from ->withProperties()
   `ip_address`     VARCHAR(45)  DEFAULT NULL,      -- IPv4 or IPv6
   `user_agent`     TEXT         DEFAULT NULL,      -- Request client string
   `url`            TEXT         DEFAULT NULL,      -- Full request URL
@@ -602,13 +791,16 @@ CREATE TABLE `audits` (
   KEY `idx_audits_event_time` (`event`, `created_at`),
 
   -- Pruning: DELETE WHERE created_at < ?
-  KEY `idx_audits_created_at` (`created_at`)
+  KEY `idx_audits_created_at` (`created_at`),
+
+  -- "Show all billing activities"
+  KEY `idx_audits_log_name`   (`log_name`, `created_at`)
 );
 ```
 
 ---
 
-## 13. Troubleshooting
+## 15. Troubleshooting
 
 ### Audits Not Being Written
 

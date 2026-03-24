@@ -153,6 +153,30 @@ trait AuditQueryScopes
     }
 
     /**
+     * Scope to audits in one or more named log channels.
+     *
+     * @param  Builder   $query
+     * @param  string    ...$logNames  One or more channel names (e.g. 'auth', 'billing').
+     * @return Builder
+     */
+    public function scopeInLog(Builder $query, string ...$logNames): Builder
+    {
+        return $query->whereIn('log_name', $logNames);
+    }
+
+    /**
+     * Scope to audits with an exact description match.
+     *
+     * @param  Builder  $query
+     * @param  string   $description  The activity description to search for.
+     * @return Builder
+     */
+    public function scopeWithDescription(Builder $query, string $description): Builder
+    {
+        return $query->where('description', $description);
+    }
+
+    /**
      * Scope to order results from newest to oldest.
      *
      * @param  Builder  $query

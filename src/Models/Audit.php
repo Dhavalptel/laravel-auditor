@@ -20,12 +20,17 @@ use Illuminate\Support\Str;
  *
  * @property string                   $id
  * @property AuditEvent               $event
+ * @property string|null              $log_name
+ * @property string|null              $description
  * @property string                   $auditable_type
  * @property string                   $auditable_id
  * @property string|null              $user_type
  * @property string|null              $user_id
+ * @property string|null              $causer_type
+ * @property string|null              $causer_id
  * @property array<string,mixed>|null $old_values
  * @property array<string,mixed>|null $new_values
+ * @property array<string,mixed>|null $properties
  * @property string|null              $ip_address
  * @property string|null              $user_agent
  * @property string|null              $url
@@ -64,12 +69,17 @@ class Audit extends Model
     protected $fillable = [
         'id',
         'event',
+        'log_name',
+        'description',
         'auditable_type',
         'auditable_id',
         'user_type',
         'user_id',
+        'causer_type',
+        'causer_id',
         'old_values',
         'new_values',
+        'properties',
         'ip_address',
         'user_agent',
         'url',
@@ -86,6 +96,7 @@ class Audit extends Model
         'event'      => AuditEvent::class,
         'old_values' => 'array',
         'new_values' => 'array',
+        'properties' => 'array',
         'tags'       => 'array',
         'created_at' => 'datetime',
     ];
@@ -132,6 +143,19 @@ class Audit extends Model
      * @return MorphTo<Model, $this>
      */
     public function user(): MorphTo
+    {
+        return $this->morphTo();
+    }
+
+    /**
+     * Polymorphic relation to the model that explicitly caused this activity.
+     *
+     * Only populated by the fluent ActivityBuilder path via ->causedBy().
+     * Distinct from user(), which is auto-resolved from auth context.
+     *
+     * @return MorphTo<Model, $this>
+     */
+    public function causer(): MorphTo
     {
         return $this->morphTo();
     }

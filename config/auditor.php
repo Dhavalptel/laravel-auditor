@@ -112,6 +112,25 @@ return [
     |
     */
     'user_resolver' => \DevToolbox\Auditor\Resolvers\UserResolver::class,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Custom Audit Model
+    |--------------------------------------------------------------------------
+    |
+    | Override the default Audit model with your own implementation.
+    | This is useful when you need to add custom methods, relationships,
+    | scopes, or table-level logic to your audit records.
+    |
+    | Your custom model MUST extend DevToolbox\Auditor\Models\Audit to
+    | preserve built-in behaviour (ULID keys, query scopes, casts, etc.).
+    |
+    | Example:
+    |   'audit_model' => App\Models\CustomAudit::class,
+    |
+    */
+    'audit_model' => \DevToolbox\Auditor\Models\Audit::class,
+
     /*
     |--------------------------------------------------------------------------
     | Raw DB Query Listener
@@ -171,6 +190,7 @@ return [
         |
         */
         'exclude_tables' => [
+            'migrations',               // Laravel migration tracker
             'jobs',                     // Laravel queue jobs table
             'failed_jobs',              // Laravel failed queue jobs
             'cache',                    // Laravel cache store

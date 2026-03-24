@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 use DevToolbox\Auditor\Tests\TestCase;
 
+// Load test model definitions — all three classes live in a single file
+// which PSR-4 cannot auto-resolve, so we require it explicitly here.
+require_once __DIR__ . '/Models.php';
+
 uses(TestCase::class)->in('Feature', 'Unit');
 
 /**
