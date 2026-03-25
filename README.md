@@ -141,6 +141,147 @@ The package registers a **global observer** on Laravel's base `Illuminate\Databa
 
 > **Note on soft deletes:** Soft-delete and hard-delete both produce an `AuditEvent::Deleted` record. The distinction is visible in the `old_values` payload — a soft-deleted record retains all attributes including the `deleted_at` timestamp.
 
+### The Three Auditing Layers
+
+The package supports three distinct ways to create audit records. They serve different purposes and produce different record shapes:
+
+| | Eloquent ORM | Raw DB (Query Listener) | Manual Fluent API |
+|---|---|---|---|
+| **Trigger** | Automatic | Automatic | Explicit `->log()` call |
+| **Code needed** | Zero | Zero | Yes — intentional |
+| **`event`** | `created` / `updated` / `deleted` / ... | `created` / `updated` / `deleted` / ... | `activity` |
+| **`log_name`** | `null` | `null` | e.g. `'auth'`, `'billing'` |
+| **`description`** | `null` | `null` | e.g. `'User logged in'` |
+| **`old_values` / `new_values`** | Captured automatically | `null` (SQL-level) | `null` |
+| **`user_type` / `user_id`** | Auto (from auth) | Auto (from auth) | `null` |
+| **`causer_type` / `causer_id`** | `null` | `null` | Set via `->causedBy()` |
+| **`properties`** | `null` | `null` | Set via `->withProperties()` |
+| **Best for** | Model history trail | Raw query safety net | Business events, explicit actions |
+
+#### Layer 1 — Eloquent ORM (automatic, attribute-level)
+
+```php
+// ── You write this ────────────────────────────────────────────────────────────
+$user = User::create([
+    'name'  => 'Alice',
+    'email' => 'alice@example.com',
+]);
+
+// ── Auditor automatically captures ───────────────────────────────────────────
+// event          → 'created'
+// auditable_type → 'App\Models\User'
+// auditable_id   → 1
+// user_type/id   → current authenticated user (auto-resolved from auth())
+// new_values     → { "name": "Alice", "email": "alice@example.com" }
+// old_values     → null
+// log_name       → null  (not a manual activity)
+// description    → null  (not a manual activity)
+// properties     → null  (not a manual activity)
+```
+
+The Eloquent path captures the **full attribute diff** — exactly what changed, before and after. The authenticated user is resolved automatically. No code changes to your model are needed.
+
+#### Layer 2 — Raw DB Query Builder (automatic, SQL-level)
+
+```php
+// ── You write this ────────────────────────────────────────────────────────────
+DB::table('users')
+    ->where('id', 1)
+    ->update(['name' => 'Bob']);
+
+// ── Auditor automatically captures ───────────────────────────────────────────
+// event          → 'updated'
+// auditable_type → 'App\Models\User'  (inferred from table name 'users')
+// auditable_id   → null               (no model instance available at SQL level)
+// user_type/id   → current authenticated user (auto-resolved)
+// old_values     → null               (SQL can't see what the old value was)
+// new_values     → null               (SQL can't see the full model state)
+// log_name       → null
+// description    → null
+// properties     → null
+```
+
+The DB listener is a **safety net** for raw queries that bypass Eloquent. It knows the table, the operation type, and the current user — but it cannot produce an attribute diff because it only has access to the SQL, not the model's in-memory state.
+
+#### Layer 3 — Manual Fluent API (intentional, business-event level)
+
+```php
+// ── You write this ────────────────────────────────────────────────────────────
+Auditor::inLog('auth')
+    ->causedBy($admin)
+    ->performedOn($user)
+    ->withProperties([
+        'ip'     => request()->ip(),
+        'reason' => 'forced logout by admin',
+    ])
+    ->log('User session terminated');
+
+// ── Auditor captures exactly what you told it ────────────────────────────────
+// event          → 'activity'
+// log_name       → 'auth'
+// description    → 'User session terminated'
+// auditable_type → 'App\Models\User'   (from ->performedOn($user))
+// auditable_id   → 1
+// causer_type    → 'App\Models\Admin'  (from ->causedBy($admin))
+// causer_id      → 5
+// properties     → { "ip": "192.168.1.1", "reason": "forced logout by admin" }
+// user_type/id   → null               (fluent path does not auto-resolve auth)
+// old_values     → null               (not tracking a data change)
+// new_values     → null               (not tracking a data change)
+```
+
+The fluent API records **business intent** — the *why*, not the *what*. Use it for events that aren't simple model saves: logins, policy decisions, admin actions, payment processing steps, etc.
+
+#### Side-by-Side: Same Scenario, Three Approaches
+
+```php
+// Scenario: an admin invalidates a user's session due to suspicious activity.
+
+// ① Eloquent — automatic, tells you WHAT data changed
+$user->update(['session_token' => null]);
+// → event=updated, old_values={session_token:'abc123'}, new_values={session_token:null}
+// → WHO: auth()->user() auto-resolved.  WHY: unknown.
+
+// ② DB::table — automatic SQL-level catch, but loses attribute detail
+DB::table('users')->where('id', $user->id)->update(['session_token' => null]);
+// → event=updated, old_values=null, new_values=null  (SQL can't diff attributes)
+// → WHO: auth()->user() auto-resolved.  WHY: unknown.
+
+// ③ Fluent API — intentional, tells you WHY it happened
+Auditor::inLog('security')
+    ->causedBy($admin)
+    ->performedOn($user)
+    ->withProperties(['reason' => 'suspicious login from unknown IP'])
+    ->log('Session forcibly invalidated');
+// → event=activity, log_name='security', description='Session forcibly invalidated'
+// → causer=$admin, subject=$user, properties={reason:'suspicious login from unknown IP'}
+// → No attribute diff — this records business intent, not a data change.
+```
+
+> **Rule of thumb:** Use Eloquent/DB automatic auditing to answer *"what changed in the data?"* and the fluent API to answer *"why did this business event happen?"*. Both run independently and complement each other — you can do all three in the same request.
+
+#### Querying Each Layer
+
+```php
+use DevToolbox\Auditor\Models\Audit;
+use DevToolbox\Auditor\Enums\AuditEvent;
+
+// All automatic audits (Eloquent + DB listener) for a specific user record
+Audit::forModel($user)->latest()->paginate(25);
+
+// Only manual activity logs in the 'security' channel
+Audit::inLog('security')->event(AuditEvent::Activity)->latest()->paginate(25);
+
+// Everything involving a user — both as auditable subject AND as explicit causer
+Audit::where(function ($q) use ($user) {
+    $q->forModel($user)                                       // automatic: auditable columns
+      ->orWhere(function ($q) use ($user) {
+          $q->where('causer_type', $user->getMorphClass())    // manual: causer columns
+            ->where('causer_id', $user->getKey());
+      });
+})->latest()->paginate(25);
+```
+
 ---
 
 ## 4. Optional: Per-Model Configuration
