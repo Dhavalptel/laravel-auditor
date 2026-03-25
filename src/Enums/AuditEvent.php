@@ -14,6 +14,7 @@ enum AuditEvent: string
     case Updated  = 'updated';
     case Deleted  = 'deleted';
     case Restored = 'restored';
+    case Activity = 'activity';
 
     /**
      * Returns a human-readable label for the event.
@@ -26,6 +27,7 @@ enum AuditEvent: string
             self::Updated  => 'Updated',
             self::Deleted  => 'Deleted',
             self::Restored => 'Restored',
+            self::Activity => 'Activity',
         };
     }
 

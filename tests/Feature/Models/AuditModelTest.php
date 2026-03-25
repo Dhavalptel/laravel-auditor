@@ -147,8 +147,8 @@ describe('Audit model scopes', function () {
     describe('scopeWithTag', function () {
 
         it('returns records with the specified tag', function () {
-            seedAudit(['tags' => json_encode(['billing', 'admin'])]);
-            seedAudit(['tags' => json_encode(['users'])]);
+            seedAudit(['tags' => ['billing', 'admin']]);
+            seedAudit(['tags' => ['users']]);
             seedAudit(['tags' => null]);
 
             $results = Audit::withTag('billing')->get();
@@ -162,8 +162,8 @@ describe('Audit model scopes', function () {
     describe('scopeWhereAttributeChanged', function () {
 
         it('returns records where a specific attribute was changed', function () {
-            seedAudit(['new_values' => json_encode(['name' => 'Bob', 'email' => 'bob@test.com'])]);
-            seedAudit(['new_values' => json_encode(['email' => 'alice@test.com'])]);
+            seedAudit(['new_values' => ['name' => 'Bob', 'email' => 'bob@test.com']]);
+            seedAudit(['new_values' => ['email' => 'alice@test.com']]);
             seedAudit(['new_values' => null]);
 
             $results = Audit::whereAttributeChanged('name')->get();
@@ -178,8 +178,8 @@ describe('Audit model scopes', function () {
 
         it('returns a structured diff of old and new values', function () {
             $audit = seedAudit([
-                'old_values' => json_encode(['name' => 'Alice', 'role' => 'user']),
-                'new_values' => json_encode(['name' => 'Bob', 'role' => 'user']),
+                'old_values' => ['name' => 'Alice', 'role' => 'user'],
+                'new_values' => ['name' => 'Bob', 'role' => 'user'],
             ]);
 
             $diff = $audit->diff();
@@ -192,7 +192,7 @@ describe('Audit model scopes', function () {
         });
 
         it('handles null old or new values gracefully', function () {
-            $audit = seedAudit(['old_values' => null, 'new_values' => json_encode(['name' => 'Alice'])]);
+            $audit = seedAudit(['old_values' => null, 'new_values' => ['name' => 'Alice']]);
 
             $diff = $audit->diff();
 

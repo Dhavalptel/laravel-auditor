@@ -145,6 +145,76 @@ describe('AuditService', function () {
         // Should not throw — audit failures are silent
         expect(fn () => $this->service->record($model, AuditEvent::Created))->not->toThrow(\Throwable::class);
     });
+
+    // ─── Fluent builder factory methods ─────────────────────────────────────
+
+    it('newActivity() returns an ActivityBuilder instance', function () {
+        $builder = $this->service->newActivity();
+
+        expect($builder)->toBeInstanceOf(\DevToolbox\Auditor\Builders\ActivityBuilder::class);
+    });
+
+    it('inLog() returns an ActivityBuilder pre-set with the log name', function () {
+        $builder = $this->service->inLog('auth');
+
+        expect($builder)->toBeInstanceOf(\DevToolbox\Auditor\Builders\ActivityBuilder::class);
+
+        // Confirm the log name was set by writing a record
+        $audit = $builder->log('test');
+        expect($audit->log_name)->toBe('auth');
+    });
+
+    it('causedBy() returns an ActivityBuilder', function () {
+        $model = makeModel();
+        $builder = $this->service->causedBy($model);
+
+        expect($builder)->toBeInstanceOf(\DevToolbox\Auditor\Builders\ActivityBuilder::class);
+    });
+
+    it('performedOn() returns an ActivityBuilder', function () {
+        $model = makeModel();
+        $builder = $this->service->performedOn($model);
+
+        expect($builder)->toBeInstanceOf(\DevToolbox\Auditor\Builders\ActivityBuilder::class);
+    });
+
+    it('withProperties() returns an ActivityBuilder', function () {
+        $builder = $this->service->withProperties(['key' => 'val']);
+
+        expect($builder)->toBeInstanceOf(\DevToolbox\Auditor\Builders\ActivityBuilder::class);
+    });
+
+    // ─── Model swapping ──────────────────────────────────────────────────────
+
+    it('writeSync() uses the configured audit_model class', function () {
+        config(['auditor.audit_model' => Audit::class]);
+
+        $dto = new \DevToolbox\Auditor\DTOs\AuditEventDTO(
+            event: AuditEvent::Created,
+            auditableType: 'App\\Models\\User',
+            auditableId: '1',
+            userType: null,
+            userId: null,
+            oldValues: [],
+            newValues: ['name' => 'Alice'],
+            ipAddress: null,
+            userAgent: null,
+            url: null,
+            tags: [],
+            occurredAt: new \DateTimeImmutable(),
+        );
+
+        $result = $this->service->writeSync($dto);
+        expect($result)->toBeInstanceOf(Audit::class);
+    });
+
+    it('shouldAudit() returns false for the configured custom audit model', function () {
+        config(['auditor.audit_model' => Audit::class]);
+
+        $audit = Mockery::mock(Audit::class)->makePartial();
+        expect($this->service->shouldAudit($audit, AuditEvent::Created))->toBeFalse();
+    });
+
 });
 
 /**

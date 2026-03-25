@@ -17,7 +17,8 @@ describe('AuditEvent enum', function () {
             ->toContain('read')
             ->toContain('updated')
             ->toContain('deleted')
-            ->toContain('restored');
+            ->toContain('restored')
+            ->toContain('activity');
     });
 
     it('returns a human-readable label for each case', function () {
@@ -25,7 +26,8 @@ describe('AuditEvent enum', function () {
             ->and(AuditEvent::Read->label())->toBe('Read')
             ->and(AuditEvent::Updated->label())->toBe('Updated')
             ->and(AuditEvent::Deleted->label())->toBe('Deleted')
-            ->and(AuditEvent::Restored->label())->toBe('Restored');
+            ->and(AuditEvent::Restored->label())->toBe('Restored')
+            ->and(AuditEvent::Activity->label())->toBe('Activity');
     });
 
     it('can be created from a string value', function () {
@@ -36,7 +38,7 @@ describe('AuditEvent enum', function () {
         expect(fn () => AuditEvent::from('invalid'))->toThrow(\ValueError::class);
     });
 
-    it('values() returns exactly 5 items', function () {
-        expect(AuditEvent::values())->toHaveCount(5);
+    it('values() returns exactly 6 items', function () {
+        expect(AuditEvent::values())->toHaveCount(6);
     });
 });

@@ -53,6 +53,10 @@ abstract class TestCase extends OrchestraTestCase
 
         // Disable read tracking by default in tests (override per test if needed)
         $app['config']->set('auditor.events.read', false);
+
+        // Disable the raw DB query listener in tests to prevent it from creating
+        // duplicate audit records alongside the Eloquent observer.
+        $app['config']->set('auditor.db_listener.enabled', false);
     }
 
     /**

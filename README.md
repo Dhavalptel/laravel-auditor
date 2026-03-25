@@ -9,17 +9,18 @@
 1. [Installation](#1-installation)
 2. [Configuration](#2-configuration)
 3. [How It Works](#3-how-it-works)
-4. [Raw DB Query Auditing](#4-raw-db-query-auditing)
-5. [Optional: Per-Model Configuration](#5-optional-per-model-configuration)
-6. [Querying Audit Records](#6-querying-audit-records)
-7. [Working with Millions of Records](#7-working-with-millions-of-records)
-8. [Queue Setup](#8-queue-setup)
-9. [Pruning Old Records](#9-pruning-old-records)
-10. [Custom User Resolver](#10-custom-user-resolver)
-11. [Disabling Auditing](#11-disabling-auditing)
-12. [Facade Reference](#12-facade-reference)
-13. [Database Schema Reference](#13-database-schema-reference)
-14. [Troubleshooting](#14-troubleshooting)
+4. [Optional: Per-Model Configuration](#4-optional-per-model-configuration)
+5. [Querying Audit Records](#5-querying-audit-records)
+6. [Working with Millions of Records](#6-working-with-millions-of-records)
+7. [Queue Setup](#7-queue-setup)
+8. [Pruning Old Records](#8-pruning-old-records)
+9. [Custom User Resolver](#9-custom-user-resolver)
+10. [Manual Activity Logging](#10-manual-activity-logging)
+11. [Custom Audit Model](#11-custom-audit-model)
+12. [Disabling Auditing](#12-disabling-auditing)
+13. [Facade Reference](#13-facade-reference)
+14. [Database Schema Reference](#14-database-schema-reference)
+15. [Troubleshooting](#15-troubleshooting)
 
 ---
 
@@ -157,6 +158,147 @@ The package registers a **global observer** on Laravel's base `Illuminate\Databa
 | `forceDeleted`   | `deleted`   | All model attributes      | *(empty)*                |
 
 > **Note on soft deletes:** Soft-delete and hard-delete both produce an `AuditEvent::Deleted` record. The distinction is visible in the `old_values` payload — a soft-deleted record retains all attributes including the `deleted_at` timestamp.
+
+### The Three Auditing Layers
+
+The package supports three distinct ways to create audit records. They serve different purposes and produce different record shapes:
+
+| | Eloquent ORM | Raw DB (Query Listener) | Manual Fluent API |
+|---|---|---|---|
+| **Trigger** | Automatic | Automatic | Explicit `->log()` call |
+| **Code needed** | Zero | Zero | Yes — intentional |
+| **`event`** | `created` / `updated` / `deleted` / ... | `created` / `updated` / `deleted` / ... | `activity` |
+| **`log_name`** | `null` | `null` | e.g. `'auth'`, `'billing'` |
+| **`description`** | `null` | `null` | e.g. `'User logged in'` |
+| **`old_values` / `new_values`** | Captured automatically | `null` (SQL-level) | `null` |
+| **`user_type` / `user_id`** | Auto (from auth) | Auto (from auth) | `null` |
+| **`causer_type` / `causer_id`** | `null` | `null` | Set via `->causedBy()` |
+| **`properties`** | `null` | `null` | Set via `->withProperties()` |
+| **Best for** | Model history trail | Raw query safety net | Business events, explicit actions |
+
+#### Layer 1 — Eloquent ORM (automatic, attribute-level)
+
+```php
+// ── You write this ────────────────────────────────────────────────────────────
+$user = User::create([
+    'name'  => 'Alice',
+    'email' => 'alice@example.com',
+]);
+
+// ── Auditor automatically captures ───────────────────────────────────────────
+// event          → 'created'
+// auditable_type → 'App\Models\User'
+// auditable_id   → 1
+// user_type/id   → current authenticated user (auto-resolved from auth())
+// new_values     → { "name": "Alice", "email": "alice@example.com" }
+// old_values     → null
+// log_name       → null  (not a manual activity)
+// description    → null  (not a manual activity)
+// properties     → null  (not a manual activity)
+```
+
+The Eloquent path captures the **full attribute diff** — exactly what changed, before and after. The authenticated user is resolved automatically. No code changes to your model are needed.
+
+#### Layer 2 — Raw DB Query Builder (automatic, SQL-level)
+
+```php
+// ── You write this ────────────────────────────────────────────────────────────
+DB::table('users')
+    ->where('id', 1)
+    ->update(['name' => 'Bob']);
+
+// ── Auditor automatically captures ───────────────────────────────────────────
+// event          → 'updated'
+// auditable_type → 'App\Models\User'  (inferred from table name 'users')
+// auditable_id   → null               (no model instance available at SQL level)
+// user_type/id   → current authenticated user (auto-resolved)
+// old_values     → null               (SQL can't see what the old value was)
+// new_values     → null               (SQL can't see the full model state)
+// log_name       → null
+// description    → null
+// properties     → null
+```
+
+The DB listener is a **safety net** for raw queries that bypass Eloquent. It knows the table, the operation type, and the current user — but it cannot produce an attribute diff because it only has access to the SQL, not the model's in-memory state.
+
+#### Layer 3 — Manual Fluent API (intentional, business-event level)
+
+```php
+// ── You write this ────────────────────────────────────────────────────────────
+Auditor::inLog('auth')
+    ->causedBy($admin)
+    ->performedOn($user)
+    ->withProperties([
+        'ip'     => request()->ip(),
+        'reason' => 'forced logout by admin',
+    ])
+    ->log('User session terminated');
+
+// ── Auditor captures exactly what you told it ────────────────────────────────
+// event          → 'activity'
+// log_name       → 'auth'
+// description    → 'User session terminated'
+// auditable_type → 'App\Models\User'   (from ->performedOn($user))
+// auditable_id   → 1
+// causer_type    → 'App\Models\Admin'  (from ->causedBy($admin))
+// causer_id      → 5
+// properties     → { "ip": "192.168.1.1", "reason": "forced logout by admin" }
+// user_type/id   → null               (fluent path does not auto-resolve auth)
+// old_values     → null               (not tracking a data change)
+// new_values     → null               (not tracking a data change)
+```
+
+The fluent API records **business intent** — the *why*, not the *what*. Use it for events that aren't simple model saves: logins, policy decisions, admin actions, payment processing steps, etc.
+
+#### Side-by-Side: Same Scenario, Three Approaches
+
+```php
+// Scenario: an admin invalidates a user's session due to suspicious activity.
+
+// ① Eloquent — automatic, tells you WHAT data changed
+$user->update(['session_token' => null]);
+// → event=updated, old_values={session_token:'abc123'}, new_values={session_token:null}
+// → WHO: auth()->user() auto-resolved.  WHY: unknown.
+
+// ② DB::table — automatic SQL-level catch, but loses attribute detail
+DB::table('users')->where('id', $user->id)->update(['session_token' => null]);
+// → event=updated, old_values=null, new_values=null  (SQL can't diff attributes)
+// → WHO: auth()->user() auto-resolved.  WHY: unknown.
+
+// ③ Fluent API — intentional, tells you WHY it happened
+Auditor::inLog('security')
+    ->causedBy($admin)
+    ->performedOn($user)
+    ->withProperties(['reason' => 'suspicious login from unknown IP'])
+    ->log('Session forcibly invalidated');
+// → event=activity, log_name='security', description='Session forcibly invalidated'
+// → causer=$admin, subject=$user, properties={reason:'suspicious login from unknown IP'}
+// → No attribute diff — this records business intent, not a data change.
+```
+
+> **Rule of thumb:** Use Eloquent/DB automatic auditing to answer *"what changed in the data?"* and the fluent API to answer *"why did this business event happen?"*. Both run independently and complement each other — you can do all three in the same request.
+
+#### Querying Each Layer
+
+```php
+use DevToolbox\Auditor\Models\Audit;
+use DevToolbox\Auditor\Enums\AuditEvent;
+
+// All automatic audits (Eloquent + DB listener) for a specific user record
+Audit::forModel($user)->latest()->paginate(25);
+
+// Only manual activity logs in the 'security' channel
+Audit::inLog('security')->event(AuditEvent::Activity)->latest()->paginate(25);
+
+// Everything involving a user — both as auditable subject AND as explicit causer
+Audit::where(function ($q) use ($user) {
+    $q->forModel($user)                                       // automatic: auditable columns
+      ->orWhere(function ($q) use ($user) {
+          $q->where('causer_type', $user->getMorphClass())    // manual: causer columns
+            ->where('causer_id', $user->getKey());
+      });
+})->latest()->paginate(25);
+```
 
 ---
 
@@ -665,7 +807,168 @@ Then update `config/auditor.php`:
 
 ---
 
-## 11. Disabling Auditing
+## 11. Manual Activity Logging
+
+In addition to automatic Eloquent auditing, you can manually log activities using a fluent builder API — similar to Spatie Activity Log.
+
+### Basic Usage
+
+```php
+use DevToolbox\Auditor\Facades\Auditor;
+
+Auditor::inLog('auth')->log('User logged in');
+```
+
+### Log Names — Grouping Activities into Channels
+
+Organise activities into named channels:
+
+```php
+Auditor::inLog('auth')->log('User logged in');
+Auditor::inLog('billing')->log('Invoice created');
+Auditor::inLog('admin')->log('Settings updated');
+```
+
+Activities without a log name default to the `'default'` channel:
+
+```php
+Auditor::newActivity()->log('Something happened'); // log_name = 'default'
+```
+
+### causedBy() — Set Who Caused the Activity
+
+```php
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->log('Invoice voided');
+
+// Stored in causer_type / causer_id columns
+$audit->causer; // returns the $admin model
+```
+
+> **Note:** `causedBy()` populates `causer_type`/`causer_id`. These are distinct from `user_type`/`user_id`, which are auto-populated from the auth context by the global Eloquent observer. The two sets of columns coexist without conflict.
+
+### performedOn() — Set the Subject Model
+
+```php
+Auditor::inLog('billing')
+    ->performedOn($invoice)
+    ->log('Invoice sent to customer');
+
+// Stored in auditable_type / auditable_id columns
+$audit->auditable; // returns the $invoice model
+```
+
+### withProperties() — Attach Custom Data
+
+```php
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->performedOn($invoice)
+    ->withProperties([
+        'amount'   => 1500.00,
+        'currency' => 'USD',
+        'reason'   => 'Annual subscription',
+    ])
+    ->log('Invoice created');
+
+// Retrieve properties
+$audit->properties['amount']; // 1500.00
+```
+
+Add a single property without overwriting the rest:
+
+```php
+Auditor::withProperties(['amount' => 500])
+    ->withProperty('currency', 'USD')
+    ->log('Partial refund');
+```
+
+### Full Fluent Chain
+
+```php
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->performedOn($invoice)
+    ->withProperties(['amount' => 1500, 'plan' => 'pro'])
+    ->log('Invoice created');
+```
+
+### Facade Shortcuts
+
+Any builder method can be called directly on the facade — a new builder is created automatically:
+
+```php
+Auditor::causedBy($user)->log('Profile updated');
+Auditor::performedOn($post)->log('Post viewed by admin');
+Auditor::withProperties(['ip' => $request->ip()])->log('Suspicious login');
+```
+
+### Querying Manual Activity Logs
+
+```php
+use DevToolbox\Auditor\Models\Audit;
+use DevToolbox\Auditor\Enums\AuditEvent;
+
+// All activities in the 'billing' channel
+Audit::inLog('billing')->latest()->paginate(50);
+
+// Multiple channels at once
+Audit::inLog('billing', 'invoices')->latest()->get();
+
+// By specific description
+Audit::withDescription('Invoice created')->latest()->get();
+
+// Filter by event type (all manual activities use AuditEvent::Activity)
+Audit::event(AuditEvent::Activity)->latest()->paginate(50);
+
+// Combine with other scopes
+Audit::inLog('auth')
+    ->event(AuditEvent::Activity)
+    ->withinDays(7)
+    ->latest()
+    ->paginate(25);
+```
+
+---
+
+## 12. Custom Audit Model
+
+Swap the default `Audit` model for your own implementation to add custom methods, relationships, or table logic.
+
+### Step 1 — Create Your Custom Model
+
+```php
+namespace App\Models;
+
+use DevToolbox\Auditor\Models\Audit as BaseAudit;
+
+class CustomAudit extends BaseAudit
+{
+    /**
+     * Example: a custom scope for your application.
+     */
+    public function scopeForTenant($query, int $tenantId)
+    {
+        return $query->where('properties->tenant_id', $tenantId);
+    }
+}
+```
+
+> Your model **must extend** `DevToolbox\Auditor\Models\Audit` to preserve all built-in behaviour (ULID keys, query scopes, relationships, casts).
+
+### Step 2 — Register the Model in Config
+
+```php
+// config/auditor.php
+'audit_model' => \App\Models\CustomAudit::class,
+```
+
+That's it. All audit writes — automatic Eloquent events and manual `->log()` calls — will now create `CustomAudit` records. The `audits()` and `auditTrail()` helpers on models using `HasAuditOptions` will also resolve to your custom model automatically.
+
+---
+
+## 13. Disabling Auditing
 
 ### Globally (via .env)
 
@@ -709,11 +1012,13 @@ AUDITOR_ENABLED=false
 
 ---
 
-## 12. Facade Reference
+## 14. Facade Reference
 
 ```php
 use DevToolbox\Auditor\Facades\Auditor;
 use DevToolbox\Auditor\Enums\AuditEvent;
+
+// --- Automatic auditing ---
 
 // Manually record an event
 Auditor::record($model, AuditEvent::Updated);
@@ -723,22 +1028,46 @@ Auditor::shouldAudit($model, AuditEvent::Created); // bool
 
 // Write directly to DB (bypasses queue)
 Auditor::writeSync($dto);
+
+// --- Manual activity logging (fluent builder) ---
+
+// Create a fresh builder
+Auditor::newActivity();                                     // ActivityBuilder
+
+// Start the chain from any method
+Auditor::inLog('auth');                                     // ActivityBuilder
+Auditor::causedBy($user);                                   // ActivityBuilder
+Auditor::performedOn($model);                               // ActivityBuilder
+Auditor::withProperties(['key' => 'value']);                // ActivityBuilder
+
+// Full chain — all methods return the same builder for chaining
+Auditor::inLog('billing')
+    ->causedBy($admin)
+    ->performedOn($invoice)
+    ->withProperties(['amount' => 500])
+    ->withProperty('currency', 'USD')
+    ->log('Invoice created');                               // ?Audit
 ```
 
 ---
 
-## 13. Database Schema Reference
+## 15. Database Schema Reference
 
 ```sql
 CREATE TABLE `audits` (
   `id`             CHAR(26)     NOT NULL,          -- ULID primary key
-  `event`          ENUM(...)    NOT NULL,          -- created|read|updated|deleted|restored
+  `event`          ENUM(...)    NOT NULL,          -- created|read|updated|deleted|restored|activity
+  `log_name`       VARCHAR(255) DEFAULT NULL,      -- Named channel (e.g. 'auth', 'billing')
+  `description`    TEXT         DEFAULT NULL,      -- Human-readable activity description
   `auditable_type` VARCHAR(255) NOT NULL,          -- Morph class name
   `auditable_id`   VARCHAR(36)  NOT NULL,          -- Morph ID (int or UUID)
-  `user_type`      VARCHAR(255) DEFAULT NULL,      -- Actor morph class (nullable)
-  `user_id`        VARCHAR(36)  DEFAULT NULL,      -- Actor ID (nullable)
+  `user_type`      VARCHAR(255) DEFAULT NULL,      -- Auto-resolved actor morph class (nullable)
+  `user_id`        VARCHAR(36)  DEFAULT NULL,      -- Auto-resolved actor ID (nullable)
+  `causer_type`    VARCHAR(255) DEFAULT NULL,      -- Explicit causer morph class (from ->causedBy())
+  `causer_id`      VARCHAR(36)  DEFAULT NULL,      -- Explicit causer ID (from ->causedBy())
   `old_values`     JSON         DEFAULT NULL,      -- State before event
   `new_values`     JSON         DEFAULT NULL,      -- State after event
+  `properties`     JSON         DEFAULT NULL,      -- Custom payload from ->withProperties()
   `ip_address`     VARCHAR(45)  DEFAULT NULL,      -- IPv4 or IPv6
   `user_agent`     TEXT         DEFAULT NULL,      -- Request client string
   `url`            TEXT         DEFAULT NULL,      -- Full request URL
@@ -757,13 +1086,16 @@ CREATE TABLE `audits` (
   KEY `idx_audits_event_time` (`event`, `created_at`),
 
   -- Pruning: DELETE WHERE created_at < ?
-  KEY `idx_audits_created_at` (`created_at`)
+  KEY `idx_audits_created_at` (`created_at`),
+
+  -- "Show all billing activities"
+  KEY `idx_audits_log_name`   (`log_name`, `created_at`)
 );
 ```
 
 ---
 
-## 14. Troubleshooting
+## 16. Troubleshooting
 
 ### Audits Not Being Written
 

@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace DevToolbox\Auditor\Services;
 
+use DevToolbox\Auditor\Builders\ActivityBuilder;
 use DevToolbox\Auditor\Contracts\Auditable;
+use DevToolbox\Auditor\DTOs\ActivityEventDTO;
 use DevToolbox\Auditor\DTOs\AuditEventDTO;
 use DevToolbox\Auditor\Enums\AuditEvent;
 use DevToolbox\Auditor\Jobs\WriteAuditJob;
@@ -23,6 +25,9 @@ use Illuminate\Support\Facades\Log;
  *
  * You should not call this class directly in most cases. The
  * GlobalModelObserver hooks into Eloquent events and delegates here.
+ *
+ * For manual activity logging, use the fluent builder via the Auditor facade:
+ *   Auditor::inLog('auth')->causedBy($user)->log('User logged in');
  */
 class AuditService
 {
@@ -86,7 +91,10 @@ class AuditService
      */
     public function writeSync(AuditEventDTO $dto): Audit
     {
-        return Audit::create($dto->toArray());
+        /** @var class-string<Audit> $modelClass */
+        $modelClass = config('auditor.audit_model', Audit::class);
+
+        return $modelClass::create($dto->toArray());
     }
 
     /**
@@ -103,7 +111,9 @@ class AuditService
      */
     public function shouldAudit(Model $model, AuditEvent $event): bool
     {
-        // Never audit the Audit model itself
+        // Never audit the Audit model itself or any model extending it.
+        // Custom audit models configured via 'auditor.audit_model' must extend Audit,
+        // so this instanceof check covers all cases without requiring a config lookup.
         if ($model instanceof Audit) {
             return false;
         }
@@ -124,6 +134,90 @@ class AuditService
 
         return true;
     }
+
+    // -------------------------------------------------------------------------
+    // Fluent Activity Builder API
+    // -------------------------------------------------------------------------
+
+    /**
+     * Creates a fresh ActivityBuilder for manually logging activities.
+     *
+     * @return ActivityBuilder
+     */
+    public function newActivity(): ActivityBuilder
+    {
+        return new ActivityBuilder($this);
+    }
+
+    /**
+     * Creates an ActivityBuilder pre-configured with the given log channel.
+     *
+     * @param  string  $logName  E.g. 'auth', 'billing', 'admin'.
+     * @return ActivityBuilder
+     */
+    public function inLog(string $logName): ActivityBuilder
+    {
+        return $this->newActivity()->inLog($logName);
+    }
+
+    /**
+     * Creates an ActivityBuilder pre-configured with the given causer.
+     *
+     * @param  Model|null  $causer
+     * @return ActivityBuilder
+     */
+    public function causedBy(?Model $causer): ActivityBuilder
+    {
+        return $this->newActivity()->causedBy($causer);
+    }
+
+    /**
+     * Creates an ActivityBuilder pre-configured with the given subject.
+     *
+     * @param  Model|null  $subject
+     * @return ActivityBuilder
+     */
+    public function performedOn(?Model $subject): ActivityBuilder
+    {
+        return $this->newActivity()->performedOn($subject);
+    }
+
+    /**
+     * Creates an ActivityBuilder pre-configured with the given properties.
+     *
+     * @param  array<string, mixed>  $properties
+     * @return ActivityBuilder
+     */
+    public function withProperties(array $properties): ActivityBuilder
+    {
+        return $this->newActivity()->withProperties($properties);
+    }
+
+    /**
+     * Writes a manual activity record directly to the database.
+     *
+     * Called by ActivityBuilder::log() after building the DTO.
+     *
+     * @param  ActivityEventDTO  $dto  The fully resolved activity data.
+     * @return Audit|null             The persisted Audit model instance, or null on failure.
+     */
+    public function writeActivity(ActivityEventDTO $dto): ?Audit
+    {
+        try {
+            /** @var class-string<Audit> $modelClass */
+            $modelClass = config('auditor.audit_model', Audit::class);
+
+            return $modelClass::create($dto->toArray());
+        } catch (\Throwable $e) {
+            Log::error('Auditor: Failed to write activity record — ' . $e->getMessage());
+
+            return null;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
 
     /**
      * Resolves the list of attribute keys to exclude from the audit record.

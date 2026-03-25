@@ -47,6 +47,8 @@ trait HasAuditOptions
     /**
      * Returns a MorphMany relationship for all audits of this model.
      *
+     * Resolves the audit model class from config to support custom model swapping.
+     *
      * Enables eager loading, filtering, and counting:
      *
      * ```php
@@ -58,8 +60,11 @@ trait HasAuditOptions
      */
     public function audits(): MorphMany
     {
+        /** @var class-string<Audit> $auditModel */
+        $auditModel = config('auditor.audit_model', Audit::class);
+
         return $this->morphMany(
-            related: Audit::class,
+            related: $auditModel,
             name: 'auditable',
             foreignKey: 'auditable_id',
             localKey: $this->getKeyName(),
@@ -69,13 +74,17 @@ trait HasAuditOptions
     /**
      * Returns a scoped query builder pre-filtered to this model's audits.
      *
+     * Resolves the audit model class from config to support custom model swapping.
      * Shorthand for `Audit::forModel($this)`.
      *
      * @return \Illuminate\Database\Eloquent\Builder<Audit>
      */
     public function auditTrail(): \Illuminate\Database\Eloquent\Builder
     {
-        return Audit::forModel($this);
+        /** @var class-string<Audit> $auditModel */
+        $auditModel = config('auditor.audit_model', Audit::class);
+
+        return $auditModel::forModel($this);
     }
 
     /**

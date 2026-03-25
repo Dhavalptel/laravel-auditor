@@ -67,30 +67,46 @@ class GlobalModelObserver
      * Fires after an existing model has been updated in the database.
      *
      * Only fires when at least one attribute is dirty (changed).
+     * Skips the internal save() call made by SoftDeletes::restore(),
+     * which would otherwise create a duplicate audit alongside restored().
      *
      * @param  Model  $model
      * @return void
      */
     public function updated(Model $model): void
     {
+        // SoftDeletes::restore() calls save() internally, firing 'updated'.
+        // We detect this by checking whether deleted_at is transitioning to null.
+        // The 'restored' event (below) handles the audit for this operation.
+        if (in_array(SoftDeletes::class, class_uses_recursive($model))) {
+            $col = $model->getDeletedAtColumn();
+            if (array_key_exists($col, $model->getDirty()) && is_null($model->$col)) {
+                return;
+            }
+        }
+
         $this->auditService->record($model, AuditEvent::Updated);
     }
 
     /**
      * Fires after a model has been deleted.
      *
-     * Handles both soft deletes and hard deletes:
-     * - Soft delete: model uses SoftDeletes trait and `deleted_at` is set.
-     * - Hard delete: any other deletion.
-     *
-     * Both map to AuditEvent::Deleted, but the distinction is visible
-     * in the `old_values` captured (soft-deleted record retains attributes).
+     * Handles soft deletes only. For models using SoftDeletes, forceDelete()
+     * fires both 'deleted' and 'forceDeleted' — this method skips the 'deleted'
+     * event in that case and lets forceDeleted() record the audit instead.
      *
      * @param  Model  $model
      * @return void
      */
     public function deleted(Model $model): void
     {
+        // When forceDelete() is called on a SoftDeletes model, Eloquent fires
+        // both 'deleted' (exists=false) and 'forceDeleted'. Skip here to avoid
+        // duplicate audits — forceDeleted() records the event instead.
+        if (!$model->exists && in_array(SoftDeletes::class, class_uses_recursive($model))) {
+            return;
+        }
+
         $this->auditService->record($model, AuditEvent::Deleted);
     }
 
