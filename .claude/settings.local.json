@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git checkout:*)",
+      "Bash(composer test:*)",
+      "Bash(vendor/bin/pest --version)",
+      "Bash(vendor/bin/pest tests/)",
+      "Bash(composer dump-autoload:*)",
+      "Bash(vendor/bin/pest tests/Feature/Builders/ActivityBuilderTest.php --no-coverage)",
+      "Bash(vendor/bin/pest tests/Feature/Models/AuditModelTest.php --filter \"diff\" --no-coverage)",
+      "Bash(vendor/bin/pest tests/ --no-coverage)",
+      "Bash(vendor/bin/pest tests/Feature/Observers/GlobalModelObserverTest.php --no-coverage)",
+      "Bash(gh pr:*)",
+      "Bash(where gh:*)",
+      "Bash(winget list:*)"
+    ]
+  }
+}
